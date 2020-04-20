@@ -132,6 +132,15 @@ func (gr *githubRepository) GetChecks(owner, repository, ref string) (*models.Ch
 	return checks, nil
 }
 
+func (gr *githubRepository) GetPullRequest(owner, repository string, number int) (*models.PullRequest, error) {
+	pullRequest, _, err := gr.pullRequestService.Get(context.TODO(), owner, repository, number)
+	if err != nil {
+		return nil, err
+	}
+
+	return fillPullRequest(pullRequest), nil
+}
+
 func (gr *githubRepository) GetPullRequests(owner, repository string) ([]models.PullRequest, error) {
 	pullRequests, _, err := gr.pullRequestService.List(context.TODO(), owner, repository, nil)
 	if err != nil {
@@ -140,17 +149,19 @@ func (gr *githubRepository) GetPullRequests(owner, repository string) ([]models.
 
 	var result []models.PullRequest
 	for _, pullRequest := range pullRequests {
-		pr := models.PullRequest{
-			ID:         pullRequest.GetNumber(),
-			Owner:      owner,
-			Repository: repository,
-			Ref:        pullRequest.Head.GetRef(),
-		}
-
-		result = append(result, pr)
+		result = append(result, *fillPullRequest(pullRequest))
 	}
 
 	return result, nil
+}
+
+func fillPullRequest(pr *githubApi.PullRequest) *models.PullRequest {
+	return &models.PullRequest{
+		ID:         pr.GetNumber(),
+		Owner:      pr.GetBase().GetUser().GetLogin(),
+		Repository: pr.GetBase().GetRepo().GetName(),
+		Ref:        pr.GetHead().GetRef(),
+	}
 }
 
 func (gr *githubRepository) GetCommit(owner, repository, sha string) (*models.Commit, error) {

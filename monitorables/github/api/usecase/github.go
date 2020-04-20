@@ -68,6 +68,54 @@ func (gu *githubUsecase) Checks(params *models.ChecksParams) (*coreModels.Tile, 
 	tile.Label = params.Repository
 	tile.Build.Branch = pointer.ToString(git.HumanizeBranch(params.Ref))
 
+	return gu.checks(params, tile)
+}
+
+func (gu *githubUsecase) PullRequest(params *models.PullRequestParams) (*coreModels.Tile, error) {
+	tile := coreModels.NewTile(api.GithubChecksTileType).WithBuild()
+
+	// Request pullRequest
+	pullRequest, err := gu.repository.GetPullRequest(params.Owner, params.Repository, *params.ID)
+	if err != nil {
+		return nil, &coreModels.MonitororError{Err: err, Tile: tile, Message: "unable to find ref checks"}
+	}
+
+	tile.Label = pullRequest.Repository
+	tile.Build.Branch = pointer.ToString(git.HumanizeBranch(pullRequest.Ref))
+	tile.Build.MergeRequest = &coreModels.TileBuildMergeRequest{
+		ID:    pullRequest.ID,
+		Title: pullRequest.Title,
+	}
+
+	// Call Checks for this PR
+	return gu.checks(&models.ChecksParams{Owner: pullRequest.Owner, Repository: pullRequest.Repository, Ref: pullRequest.Ref}, tile)
+}
+
+func (gu *githubUsecase) PullRequestsGenerator(params interface{}) ([]uiConfigModels.GeneratedTile, error) {
+	prParams := params.(*models.PullRequestGeneratorParams)
+
+	pullRequests, err := gu.repository.GetPullRequests(prParams.Owner, prParams.Repository)
+	if err != nil {
+		return nil, &coreModels.MonitororError{Err: err, Message: "unable to find pull request"}
+	}
+
+	var results []uiConfigModels.GeneratedTile
+	for _, pullRequest := range pullRequests {
+		p := &models.ChecksParams{}
+		p.Owner = pullRequest.Owner
+		p.Repository = pullRequest.Repository
+		p.Ref = pullRequest.Ref
+
+		results = append(results, uiConfigModels.GeneratedTile{
+			Label:  fmt.Sprintf("PR#%d @ %s", pullRequest.ID, pullRequest.Repository),
+			Params: p,
+		})
+	}
+
+	return results, nil
+}
+
+func (gu *githubUsecase) checks(params *models.ChecksParams, tile *coreModels.Tile) (*coreModels.Tile, error) {
 	// Request
 	checks, err := gu.repository.GetChecks(params.Owner, params.Repository, params.Ref)
 	if err != nil {
@@ -127,37 +175,13 @@ func (gu *githubUsecase) Checks(params *models.ChecksParams) (*coreModels.Tile, 
 	return tile, nil
 }
 
-func (gu *githubUsecase) PullRequestsGenerator(params interface{}) ([]uiConfigModels.GeneratedTile, error) {
-	prParams := params.(*models.PullRequestGeneratorParams)
-
-	pullRequests, err := gu.repository.GetPullRequests(prParams.Owner, prParams.Repository)
-	if err != nil {
-		return nil, &coreModels.MonitororError{Err: err, Message: "unable to find pull request"}
-	}
-
-	var results []uiConfigModels.GeneratedTile
-	for _, pullRequest := range pullRequests {
-		p := &models.ChecksParams{}
-		p.Owner = pullRequest.Owner
-		p.Repository = pullRequest.Repository
-		p.Ref = pullRequest.Ref
-
-		results = append(results, uiConfigModels.GeneratedTile{
-			Label:  fmt.Sprintf("PR#%d @ %s", pullRequest.ID, pullRequest.Repository),
-			Params: p,
-		})
-	}
-
-	return results, nil
-}
-
-func computeChecks(refStatus *models.Checks) (coreModels.TileStatus, *time.Time, *time.Time, string) {
+func computeChecks(checks *models.Checks) (coreModels.TileStatus, *time.Time, *time.Time, string) {
 	var statuses []coreModels.TileStatus
 	var startedAt *time.Time = nil
 	var finishedAt *time.Time = nil
 	var ids = ""
 
-	for _, run := range refStatus.Runs {
+	for _, run := range checks.Runs {
 		statuses = append(statuses, parseRun(&run))
 		if startedAt == nil || (run.StartedAt != nil && startedAt.After(*run.StartedAt)) {
 			startedAt = run.StartedAt
@@ -170,12 +194,12 @@ func computeChecks(refStatus *models.Checks) (coreModels.TileStatus, *time.Time,
 
 	// Sort statues by created date and save every title to remove duplicate statues
 	// Some app add new status with the same name each time status change
-	sort.Slice(refStatus.Statuses, func(i, j int) bool {
-		return refStatus.Statuses[i].CreatedAt.After(refStatus.Statuses[j].CreatedAt)
+	sort.Slice(checks.Statuses, func(i, j int) bool {
+		return checks.Statuses[i].CreatedAt.After(checks.Statuses[j].CreatedAt)
 	})
 
 	titles := make(map[string]bool)
-	for _, status := range refStatus.Statuses {
+	for _, status := range checks.Statuses {
 		if _, ok := titles[status.Title]; !ok {
 			statuses = append(statuses, parseStatus(&status))
 			titles[status.Title] = true

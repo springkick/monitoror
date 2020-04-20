@@ -158,6 +158,7 @@ func (gr *githubRepository) GetPullRequests(owner, repository string) ([]models.
 func fillPullRequest(pr *githubApi.PullRequest) *models.PullRequest {
 	return &models.PullRequest{
 		ID:         pr.GetNumber(),
+		Title:      pr.GetTitle(),
 		Owner:      pr.GetBase().GetUser().GetLogin(),
 		Repository: pr.GetBase().GetRepo().GetName(),
 		Ref:        pr.GetHead().GetRef(),

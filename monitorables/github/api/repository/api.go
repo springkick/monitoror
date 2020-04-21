@@ -157,11 +157,15 @@ func (gr *githubRepository) GetPullRequests(owner, repository string) ([]models.
 
 func fillPullRequest(pr *githubApi.PullRequest) *models.PullRequest {
 	return &models.PullRequest{
-		ID:         pr.GetNumber(),
-		Title:      pr.GetTitle(),
+		ID:    pr.GetNumber(),
+		Title: pr.GetTitle(),
+		Author: coreModels.Author{
+			Name:      pr.GetUser().GetName(),
+			AvatarURL: pr.GetUser().GetAvatarURL(),
+		},
 		Owner:      pr.GetBase().GetUser().GetLogin(),
 		Repository: pr.GetBase().GetRepo().GetName(),
-		Ref:        pr.GetHead().GetRef(),
+		Ref:        pr.GetHead().GetRef(), // Use commit hash for ref in pullrequest
 	}
 }
 

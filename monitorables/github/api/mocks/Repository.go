@@ -79,6 +79,29 @@ func (_m *Repository) GetCount(query string) (int, error) {
 	return r0, r1
 }
 
+// GetPullRequest provides a mock function with given fields: owner, repository, ID
+func (_m *Repository) GetPullRequest(owner string, repository string, ID int) (*models.PullRequest, error) {
+	ret := _m.Called(owner, repository, ID)
+
+	var r0 *models.PullRequest
+	if rf, ok := ret.Get(0).(func(string, string, int) *models.PullRequest); ok {
+		r0 = rf(owner, repository, ID)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).(*models.PullRequest)
+		}
+	}
+
+	var r1 error
+	if rf, ok := ret.Get(1).(func(string, string, int) error); ok {
+		r1 = rf(owner, repository, ID)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
 // GetPullRequests provides a mock function with given fields: owner, repository
 func (_m *Repository) GetPullRequests(owner string, repository string) ([]models.PullRequest, error) {
 	ret := _m.Called(owner, repository)

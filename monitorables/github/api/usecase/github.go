@@ -68,7 +68,31 @@ func (gu *githubUsecase) Checks(params *models.ChecksParams) (*coreModels.Tile, 
 	tile.Label = params.Repository
 	tile.Build.Branch = pointer.ToString(git.HumanizeBranch(params.Ref))
 
-	return gu.checks(params, tile)
+	// Request checks
+	checks, err := gu.repository.GetChecks(params.Owner, params.Repository, params.Ref)
+	if err != nil {
+		return nil, &coreModels.MonitororError{Err: err, Tile: tile, Message: "unable to find ref checks"}
+	}
+	if len(checks.Statuses) == 0 && len(checks.Runs) == 0 {
+		// Warning because request was correct but there is no build
+		return nil, &coreModels.MonitororError{Tile: tile, Message: "no ref checks found", ErrorStatus: coreModels.UnknownStatus}
+	}
+
+	// Compute checks into tile
+	gu.computeChecks(tile, checks, params.String())
+
+	// Author of last commit
+	if tile.Status == coreModels.FailedStatus && checks.HeadCommit != nil {
+		commit, err := gu.repository.GetCommit(params.Owner, params.Repository, *checks.HeadCommit)
+		if err == nil {
+			tile.Build.Author = &coreModels.Author{
+				Name:      commit.Author.Name,
+				AvatarURL: commit.Author.AvatarURL,
+			}
+		}
+	}
+
+	return tile, nil
 }
 
 func (gu *githubUsecase) PullRequest(params *models.PullRequestParams) (*coreModels.Tile, error) {
@@ -82,13 +106,34 @@ func (gu *githubUsecase) PullRequest(params *models.PullRequestParams) (*coreMod
 
 	tile.Label = pullRequest.Repository
 	tile.Build.Branch = pointer.ToString(git.HumanizeBranch(pullRequest.Ref))
-	tile.Build.MergeRequest = &coreModels.TileBuildMergeRequest{
+	if params.Owner != pullRequest.Owner {
+		tile.Build.Branch = pointer.ToString(fmt.Sprintf("%s:%s", pullRequest.Owner, tile.Build.Branch))
+	}
+
+	tile.Build.MergeRequest = &coreModels.TileMergeRequest{
 		ID:    pullRequest.ID,
 		Title: pullRequest.Title,
 	}
 
-	// Call Checks for this PR
-	return gu.checks(&models.ChecksParams{Owner: pullRequest.Owner, Repository: pullRequest.Repository, Ref: pullRequest.Ref}, tile)
+	// Request checks
+	checks, err := gu.repository.GetChecks(pullRequest.Owner, pullRequest.Repository, pullRequest.Ref)
+	if err != nil {
+		return nil, &coreModels.MonitororError{Err: err, Tile: tile, Message: "unable to find ref checks"}
+	}
+	if len(checks.Statuses) == 0 && len(checks.Runs) == 0 {
+		// Warning because request was correct but there is no build
+		return nil, &coreModels.MonitororError{Tile: tile, Message: "no ref checks found", ErrorStatus: coreModels.UnknownStatus}
+	}
+
+	// Compute checks into tile
+	gu.computeChecks(tile, checks, params.String())
+
+	// Author of pull request
+	if tile.Status == coreModels.FailedStatus && checks.HeadCommit != nil {
+		tile.Build.Author = &pullRequest.Author
+	}
+
+	return tile, nil
 }
 
 func (gu *githubUsecase) PullRequestsGenerator(params interface{}) ([]uiConfigModels.GeneratedTile, error) {
@@ -115,67 +160,7 @@ func (gu *githubUsecase) PullRequestsGenerator(params interface{}) ([]uiConfigMo
 	return results, nil
 }
 
-func (gu *githubUsecase) checks(params *models.ChecksParams, tile *coreModels.Tile) (*coreModels.Tile, error) {
-	// Request
-	checks, err := gu.repository.GetChecks(params.Owner, params.Repository, params.Ref)
-	if err != nil {
-		return nil, &coreModels.MonitororError{Err: err, Tile: tile, Message: "unable to find ref checks"}
-	}
-	if len(checks.Statuses) == 0 && len(checks.Runs) == 0 {
-		// Warning because request was correct but there is no build
-		return nil, &coreModels.MonitororError{Tile: tile, Message: "no ref checks found", ErrorStatus: coreModels.UnknownStatus}
-	}
-
-	var startedAt, finishedAt *time.Time
-	var id string
-	tile.Status, startedAt, finishedAt, id = computeChecks(checks)
-
-	// Set Previous Status
-	previousStatus := gu.buildsCache.GetPreviousStatus(params, id)
-	if previousStatus != nil {
-		tile.Build.PreviousStatus = *previousStatus
-	} else {
-		tile.Build.PreviousStatus = coreModels.UnknownStatus
-	}
-
-	// Author
-	if tile.Status == coreModels.FailedStatus && checks.HeadCommit != nil {
-		commit, err := gu.repository.GetCommit(params.Owner, params.Repository, *checks.HeadCommit)
-		if err == nil {
-			tile.Build.Author = &coreModels.Author{
-				Name:      commit.Author.Name,
-				AvatarURL: commit.Author.AvatarURL,
-			}
-		}
-	}
-
-	// StartedAt / FinishedAt
-	tile.Build.StartedAt = startedAt
-	if tile.Status != coreModels.RunningStatus && tile.Status != coreModels.QueuedStatus {
-		tile.Build.FinishedAt = finishedAt
-	}
-
-	// Duration
-	if tile.Status == coreModels.RunningStatus {
-		tile.Build.Duration = pointer.ToInt64(int64(time.Since(*tile.Build.StartedAt).Seconds()))
-
-		estimatedDuration := gu.buildsCache.GetEstimatedDuration(params)
-		if estimatedDuration != nil {
-			tile.Build.EstimatedDuration = pointer.ToInt64(int64(estimatedDuration.Seconds()))
-		} else {
-			tile.Build.EstimatedDuration = pointer.ToInt64(int64(0))
-		}
-	}
-
-	// Cache Duration when success / failed
-	if tile.Status == coreModels.SuccessStatus || tile.Status == coreModels.FailedStatus || tile.Status == coreModels.WarningStatus {
-		gu.buildsCache.Add(params, id, tile.Status, tile.Build.FinishedAt.Sub(*tile.Build.StartedAt))
-	}
-
-	return tile, nil
-}
-
-func computeChecks(checks *models.Checks) (coreModels.TileStatus, *time.Time, *time.Time, string) {
+func (gu *githubUsecase) computeChecks(tile *coreModels.Tile, checks *models.Checks, paramsKey string) {
 	var statuses []coreModels.TileStatus
 	var startedAt *time.Time = nil
 	var finishedAt *time.Time = nil
@@ -218,12 +203,39 @@ func computeChecks(checks *models.Checks) (coreModels.TileStatus, *time.Time, *t
 		return orderedTileStatus[statuses[i]] < orderedTileStatus[statuses[j]]
 	})
 
-	ids = hash.GetMD5Hash(ids)
-	if len(statuses) == 0 {
-		return coreModels.UnknownStatus, nil, nil, ids
+	tile.Status = statuses[0]
+	id := hash.GetMD5Hash(ids)
+
+	// Set Previous Status
+	previousStatus := gu.buildsCache.GetPreviousStatus(paramsKey, id)
+	if previousStatus != nil {
+		tile.Build.PreviousStatus = *previousStatus
+	} else {
+		tile.Build.PreviousStatus = coreModels.UnknownStatus
 	}
 
-	return statuses[0], startedAt, finishedAt, ids
+	// StartedAt / FinishedAt
+	tile.Build.StartedAt = startedAt
+	if tile.Status != coreModels.RunningStatus && tile.Status != coreModels.QueuedStatus {
+		tile.Build.FinishedAt = finishedAt
+	}
+
+	// Duration
+	if tile.Status == coreModels.RunningStatus {
+		tile.Build.Duration = pointer.ToInt64(int64(time.Since(*tile.Build.StartedAt).Seconds()))
+
+		estimatedDuration := gu.buildsCache.GetEstimatedDuration(paramsKey)
+		if estimatedDuration != nil {
+			tile.Build.EstimatedDuration = pointer.ToInt64(int64(estimatedDuration.Seconds()))
+		} else {
+			tile.Build.EstimatedDuration = pointer.ToInt64(int64(0))
+		}
+	}
+
+	// Cache Duration when success / failed
+	if tile.Status == coreModels.SuccessStatus || tile.Status == coreModels.FailedStatus || tile.Status == coreModels.WarningStatus {
+		gu.buildsCache.Add(paramsKey, id, tile.Status, tile.Build.FinishedAt.Sub(*tile.Build.StartedAt))
+	}
 }
 
 func parseRun(run *models.Run) coreModels.TileStatus {
